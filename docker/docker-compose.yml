@@ -10,6 +10,7 @@
 #       docker compose -f docker/docker-compose.yml up -d
 #
 # 提示：compose 会自动按本机 CPU 架构挑选 manifest 中对应的镜像层。
+#       GHCR 镜像只在推送 v* tag 时更新。
 
 services:
   ddns_standalone_server:

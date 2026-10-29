@@ -1,10 +1,7 @@
-# 构建上下文只包含 build.sh 暂存好的各架构静态可执行文件
+# 构建上下文只包含 build.sh 暂存好的静态可执行文件
 *
 !.build/
 .build/*
-!.build/amd64/
-!.build/arm64/
-.build/amd64/*
-.build/arm64/*
-!.build/amd64/ddns_standalone_server
-!.build/arm64/ddns_standalone_server
+!.build/*/
+.build/*/*
+!.build/*/ddns_standalone_server

@@ -6,13 +6,13 @@ name: Docker
 #
 # 全部原生编译，因此不需要 zig、cargo-zigbuild、QEMU，
 # 而且两个架构的二进制都能在 CI 里真实运行做冒烟测试。
+#
+# 触发条件：只有推送 v* 形式的 tag 才会构建并发布。
+# 需要临时验证时可手动触发（workflow_dispatch）。
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -39,7 +39,7 @@ jobs:
       tags: ${{ steps.meta.outputs.tags }}
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 解析镜像名、版本与标签
         id: meta
@@ -54,10 +54,7 @@ jobs:
           short_sha="$(echo "$GITHUB_SHA" | cut -c1-7)"
 
           # 空格分隔的标签列表，每个标签会再派生 <tag>-amd64 / <tag>-arm64
-          tags="$version sha-$short_sha"
-          if [ "$GITHUB_REF" = "refs/heads/${{ github.event.repository.default_branch }}" ]; then
-            tags="$tags latest"
-          fi
+          tags="$version sha-$short_sha latest"
           case "$GITHUB_REF" in
             refs/tags/*) tags="$tags ${GITHUB_REF#refs/tags/}" ;;
           esac
@@ -90,7 +87,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 安装 musl 工具链
         run: |
@@ -107,7 +104,7 @@ jobs:
           key: musl-${{ matrix.arch }}
 
       - name: 编译（musl 静态链接）
-        run: NO_ZIGBUILD=1 STAGE_ONLY=1 ./docker/build.sh --arch ${{ matrix.arch }}
+        run: STAGE_ONLY=1 ./docker/build.sh
 
       - name: 校验静态链接
         run: |
@@ -136,14 +133,13 @@ jobs:
           [ "$ok" = 1 ] || { echo "冒烟测试失败"; exit 1; }
 
       - name: 登录 GHCR
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 构建 ${{ matrix.arch }} 镜像
+      - name: 构建并推送 ${{ matrix.arch }} 镜像
         run: |
           image='${{ needs.prepare.outputs.image }}'
           version='${{ needs.prepare.outputs.version }}'
@@ -158,18 +154,13 @@ jobs:
               -f docker/Dockerfile \
               -t "$tag" \
               docker/
-
-            # PR 只验证 Dockerfile 能构建，不推送
-            if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
-              docker push "$tag"
-            fi
+            docker push "$tag"
           done
 
   # ---------------------------------------------------------------- 合并 manifest
   merge:
     name: 合并多架构 manifest
     needs: [prepare, build]
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
