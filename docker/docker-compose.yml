@@ -1,22 +1,28 @@
 # ddns_standalone_server 的 docker compose 运行模板
 #
-# 使用方式：
-#   方式 A（本地构建的镜像）：
-#       ./docker/build.sh
-#       docker compose -f docker/docker-compose.yml up -d
+# 直接从 GHCR 拉取多架构镜像（推荐）：
+#     docker compose -f docker/docker-compose.yml up -d
 #
-#   方式 B（从 GHCR 拉取多架构镜像）：
-#       把下面的 image 改成 ghcr.io/<owner>/ddns_standalone_server:latest
-#       docker compose -f docker/docker-compose.yml up -d
+# compose 会自动按本机 CPU 架构挑选 manifest 中对应的镜像层
+# （linux/amd64 或 linux/arm64）。
 #
-# 提示：compose 会自动按本机 CPU 架构挑选 manifest 中对应的镜像层。
-#       GHCR 镜像只在推送 v* tag 时更新。
+# 镜像只在推送 v* tag 时由 GitHub Actions 更新，可用标签：
+#     latest                              最新发布
+#     <version>                           如 0.1.0（取 Cargo.toml 版本）
+#     v<version>                          如 v0.1.0（对应 git tag）
+#     sha-<short>                         某次提交
+#
+# 如需使用本地自行构建的镜像：
+#     ./docker/build.sh
+#     docker compose -f docker/docker-compose.yml up -d
+#   然后把下面的 image 改成 ddns_standalone_server:latest
+
+# 显式指定项目名，避免从目录名推导成 "docker"
+name: ddns_standalone_server
 
 services:
   ddns_standalone_server:
-    image: ddns_standalone_server:latest
-    # 改用 GHCR 时替换为：
-    # image: ghcr.io/<owner>/ddns_standalone_server:latest
+    image: ghcr.io/magiccrazyman/ddns_standalone_server:latest
     container_name: ddns_standalone_server
     restart: unless-stopped
     ports:
