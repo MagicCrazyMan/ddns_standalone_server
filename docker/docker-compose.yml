@@ -16,6 +16,14 @@
 #     ./docker/build.sh
 #     docker compose -f docker/docker-compose.yml up -d
 #   然后把下面的 image 改成 ddns_standalone_server:latest
+#
+# IPv6 说明：
+#   本服务的作用是返回「调用方 IP」，因此必须让请求的源地址原样到达应用。
+#   Docker 的 bridge 网络 + ports 映射会做一次 NAT，容器看到的源地址会变成
+#   网桥网关（如 172.17.0.1），/ip 就返回不出真实客户端地址了。
+#   所以这里使用 host 网络：容器直接共用宿主机网络栈，
+#   应用绑定的 [::0]:9080 在 Linux 下默认双栈，
+#   IPv4 与 IPv6 客户端都能直连，且源地址保持真实。
 
 # 显式指定项目名，避免从目录名推导成 "docker"
 name: ddns_standalone_server
@@ -25,16 +33,38 @@ services:
     image: ghcr.io/magiccrazyman/ddns_standalone_server:latest
     container_name: ddns_standalone_server
     restart: unless-stopped
-    ports:
-      - "9080:9080"
+
+    # host 网络：IPv6 / IPv4 原生可用，并保留真实客户端 IP
+    # 注意 host 模式下 ports 映射会被忽略，服务固定监听 9080
+    network_mode: host
+
     # 应用以非 root 用户（uid/gid 10001）运行
     # 后续如需挂载配置文件，可在此追加：
     # volumes:
     #   - ./config.toml:/etc/ddns_standalone_server/config.toml:ro
-    #
-    # 可选健康检查（镜像内无 curl/wget，使用 bash 的 /dev/tcp）：
-    # healthcheck:
-    #   test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/9080' || exit 1"]
-    #   interval: 30s
-    #   timeout: 3s
-    #   retries: 3
+
+# ─────────────────────────────────────────────────────────────────────
+# 备选：需要容器网络隔离时改用 bridge + IPv6
+# 代价是 /ip 返回网桥网关地址而非真实客户端 IP（DDNS 场景下不可用），
+# 除非在 /etc/docker/daemon.json 中设置 "userland-proxy": false 并重启
+# Docker，让 iptables DNAT 直接转发以保留源地址。
+#
+# services:
+#   ddns_standalone_server:
+#     image: ghcr.io/magiccrazyman/ddns_standalone_server:latest
+#     container_name: ddns_standalone_server
+#     restart: unless-stopped
+#     ports:
+#       - "9080:9080"
+#     networks:
+#       - ddns
+#
+# networks:
+#   ddns:
+#     enable_ipv6: true
+#     ipam:
+#       config:
+#         - subnet: 172.28.0.0/16
+#         - subnet: fd00:dead:beef::/64
+# ─────────────────────────────────────────────────────────────────────
+
