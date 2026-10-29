@@ -1,0 +1,33 @@
+# ddns_standalone_server 的 docker compose 运行模板
+#
+# 使用方式：
+#   方式 A（本地构建的镜像）：
+#       ./docker/build.sh
+#       docker compose -f docker/docker-compose.yml up -d
+#
+#   方式 B（从 GHCR 拉取多架构镜像）：
+#       把下面的 image 改成 ghcr.io/<owner>/ddns_standalone_server:latest
+#       docker compose -f docker/docker-compose.yml up -d
+#
+# 提示：compose 会自动按本机 CPU 架构挑选 manifest 中对应的镜像层。
+
+services:
+  ddns_standalone_server:
+    image: ddns_standalone_server:latest
+    # 改用 GHCR 时替换为：
+    # image: ghcr.io/<owner>/ddns_standalone_server:latest
+    container_name: ddns_standalone_server
+    restart: unless-stopped
+    ports:
+      - "9080:9080"
+    # 应用以非 root 用户（uid/gid 10001）运行
+    # 后续如需挂载配置文件，可在此追加：
+    # volumes:
+    #   - ./config.toml:/etc/ddns_standalone_server/config.toml:ro
+    #
+    # 可选健康检查（镜像内无 curl/wget，使用 bash 的 /dev/tcp）：
+    # healthcheck:
+    #   test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/9080' || exit 1"]
+    #   interval: 30s
+    #   timeout: 3s
+    #   retries: 3

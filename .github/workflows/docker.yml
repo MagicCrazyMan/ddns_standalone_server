@@ -1,0 +1,216 @@
+name: Docker
+
+# 两个架构分别在原生 runner 上编译，最后合并成多架构 manifest：
+#   amd64 -> ubuntu-24.04      原生 x86_64，musl-gcc
+#   arm64 -> ubuntu-24.04-arm  原生 aarch64，musl-gcc
+#
+# 全部原生编译，因此不需要 zig、cargo-zigbuild、QEMU，
+# 而且两个架构的二进制都能在 CI 里真实运行做冒烟测试。
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  BINARY_NAME: ddns_standalone_server
+  REGISTRY: ghcr.io
+
+jobs:
+  # ---------------------------------------------------------------- 计算标签
+  prepare:
+    name: 准备标签
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      version: ${{ steps.meta.outputs.version }}
+      tags: ${{ steps.meta.outputs.tags }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 解析镜像名、版本与标签
+        id: meta
+        run: |
+          # GHCR 的仓库路径必须全小写
+          image="$REGISTRY/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | grep -o '"version":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+          [ -n "$version" ] || { echo "无法从 Cargo.toml 读取版本号"; exit 1; }
+
+          short_sha="$(echo "$GITHUB_SHA" | cut -c1-7)"
+
+          # 空格分隔的标签列表，每个标签会再派生 <tag>-amd64 / <tag>-arm64
+          tags="$version sha-$short_sha"
+          if [ "$GITHUB_REF" = "refs/heads/${{ github.event.repository.default_branch }}" ]; then
+            tags="$tags latest"
+          fi
+          case "$GITHUB_REF" in
+            refs/tags/*) tags="$tags ${GITHUB_REF#refs/tags/}" ;;
+          esac
+
+          {
+            echo "image=$image"
+            echo "version=$version"
+            echo "tags=$tags"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "镜像: $image"
+          echo "版本: $version"
+          echo "标签: $tags"
+
+  # ---------------------------------------------------------------- 分架构构建
+  build:
+    name: 构建 ${{ matrix.arch }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 musl 工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          musl-gcc --version | head -n 1
+
+      - name: 安装 Rust musl 目标
+        run: rustup target add ${{ matrix.target }}
+
+      - name: 缓存 cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: musl-${{ matrix.arch }}
+
+      - name: 编译（musl 静态链接）
+        run: NO_ZIGBUILD=1 STAGE_ONLY=1 ./docker/build.sh --arch ${{ matrix.arch }}
+
+      - name: 校验静态链接
+        run: |
+          bin="docker/.build/${{ matrix.arch }}/$BINARY_NAME"
+          file "$bin"
+          if ! file "$bin" | grep -qiE 'statically linked|static-pie linked'; then
+            echo "产物不是静态链接"
+            exit 1
+          fi
+
+      - name: 冒烟测试（原生运行）
+        run: |
+          chmod +x "docker/.build/${{ matrix.arch }}/$BINARY_NAME"
+          "docker/.build/${{ matrix.arch }}/$BINARY_NAME" &
+          pid=$!
+          ok=0
+          for _ in $(seq 1 20); do
+            if out=$(curl --noproxy '*' -fsS --max-time 2 http://127.0.0.1:9080/ip); then
+              echo "GET /ip -> $out"
+              ok=1
+              break
+            fi
+            sleep 0.5
+          done
+          kill "$pid" 2>/dev/null || true
+          [ "$ok" = 1 ] || { echo "冒烟测试失败"; exit 1; }
+
+      - name: 登录 GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建 ${{ matrix.arch }} 镜像
+        run: |
+          image='${{ needs.prepare.outputs.image }}'
+          version='${{ needs.prepare.outputs.version }}'
+          arch='${{ matrix.arch }}'
+
+          for t in ${{ needs.prepare.outputs.tags }}; do
+            tag="$image:$t-$arch"
+            echo "==> $tag"
+            docker build \
+              --build-arg "VERSION=$version" \
+              --build-arg "TARGETARCH=$arch" \
+              -f docker/Dockerfile \
+              -t "$tag" \
+              docker/
+
+            # PR 只验证 Dockerfile 能构建，不推送
+            if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+              docker push "$tag"
+            fi
+          done
+
+  # ---------------------------------------------------------------- 合并 manifest
+  merge:
+    name: 合并多架构 manifest
+    needs: [prepare, build]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 创建并推送 manifest list
+        run: |
+          image='${{ needs.prepare.outputs.image }}'
+          arches="amd64 arm64"
+
+          for t in ${{ needs.prepare.outputs.tags }}; do
+            target="$image:$t"
+            sources=""
+            for a in $arches; do
+              sources="$sources $image:$t-$a"
+            done
+
+            # imagetools 直接操作 registry，无本地 manifest 状态，
+            # 且对已存在的 tag 是幂等覆盖
+            echo "==> $target"
+            docker buildx imagetools create \
+              -t "$target" \
+              $sources
+          done
+
+      - name: 输出摘要
+        run: |
+          image='${{ needs.prepare.outputs.image }}'
+          for t in ${{ needs.prepare.outputs.tags }}; do
+            target="$image:$t"
+            {
+              echo "### \`$target\`"
+              echo ""
+              echo '```'
+              docker buildx imagetools inspect "$target"
+              echo '```'
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
